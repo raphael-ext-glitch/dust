@@ -9,7 +9,10 @@ import {
   getWorkspaceAdministrationVersionLock,
 } from "@app/lib/api/workspace";
 import type { Authenticator } from "@app/lib/auth";
-import { INVITATION_EXPIRATION_TIME_SEC } from "@app/lib/constants/invitation";
+import {
+  getMembershipInvitationTokenValidityStartMs,
+  INVITATION_EXPIRATION_TIME_SEC,
+} from "@app/lib/constants/invitation";
 import { MAX_UNCONSUMED_INVITATIONS_PER_WORKSPACE_PER_DAY } from "@app/lib/invitations";
 import { MembershipInvitationModel } from "@app/lib/models/membership_invitation";
 import { MembershipResource } from "@app/lib/resources/membership_resource";
@@ -69,7 +72,9 @@ export async function getInvitation(
 export function getMembershipInvitationToken(
   invitation: MembershipInvitationType
 ) {
-  const iat = Math.floor(invitation.createdAt / 1000);
+  const validityStartMs =
+    getMembershipInvitationTokenValidityStartMs(invitation);
+  const iat = Math.floor(validityStartMs / 1000);
   const exp = iat + INVITATION_EXPIRATION_TIME_SEC;
 
   return sign(
@@ -111,6 +116,25 @@ export async function sendWorkspaceInvitationEmail(
       inviteLink: getMembershipInvitationUrl(owner, invitation),
       // Escape the name to prevent XSS attacks via injected script elements.
       inviterName: escape(user.fullName),
+      workspaceName: owner.name,
+    },
+  };
+
+  sgMail.setApiKey(config.getSendgridApiKey());
+  await sgMail.send(message);
+}
+
+export async function sendWorkspaceInvitationReminderEmail(
+  owner: LightWorkspaceType,
+  invitation: MembershipInvitationType
+) {
+  // TODO: use a dedicated reminder template with "reminder" wording.
+  const message = {
+    to: invitation.inviteEmail,
+    from: config.getSupportEmailAddress(),
+    templateId: config.getInvitationEmailTemplate(),
+    dynamic_template_data: {
+      inviteLink: getMembershipInvitationUrl(owner, invitation),
       workspaceName: owner.name,
     },
   };
@@ -362,9 +386,6 @@ export async function handleMembershipInvitations(
         inviteEmail: string;
         initialRole: ActiveRoleType;
       }[] = [];
-      // Group role updates by target role so we issue one UPDATE per distinct
-      // role (bounded by the number of active roles) instead of per invitation.
-      const toUpdateRoleByRole = new Map<ActiveRoleType, ModelId[]>();
       const invitationBySanitizedEmail = new Map<
         string,
         MembershipInvitationType
@@ -375,38 +396,16 @@ export async function handleMembershipInvitations(
         role,
       } of uniqueCandidateBySanitizedEmail.values()) {
         const existing = existingByEmail.get(sanitizedEmail);
-        if (!existing || existing.isExpired()) {
-          if (existing) {
-            toRevokeModelIds.push(existing.id);
-          }
-          toCreate.push({
-            inviteEmail: sanitizedEmail,
-            initialRole: role,
-          });
-        } else {
-          if (existing.initialRole !== role) {
-            const group = toUpdateRoleByRole.get(role) ?? [];
-            group.push(existing.id);
-            toUpdateRoleByRole.set(role, group);
-          }
-          invitationBySanitizedEmail.set(sanitizedEmail, {
-            ...existing.toJSON(),
-            initialRole: role,
-          });
+        if (existing) {
+          toRevokeModelIds.push(existing.id);
         }
+        toCreate.push({ inviteEmail: sanitizedEmail, initialRole: role });
       }
 
       await MembershipInvitationResource.bulkRevokeByModelIds(auth, {
         modelIds: toRevokeModelIds,
         transaction: t,
       });
-
-      for (const [role, modelIds] of toUpdateRoleByRole) {
-        await MembershipInvitationResource.bulkUpdateInitialRoleByModelIds(
-          auth,
-          { modelIds, role, transaction: t }
-        );
-      }
 
       const created = await MembershipInvitationResource.bulkMakeNewPending(
         auth,
