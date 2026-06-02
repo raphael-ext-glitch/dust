@@ -1,6 +1,9 @@
 import { getDefaultMCPAction } from "@app/components/agent_builder/types";
 import type { SkillBuilderFormData } from "@app/components/skill_builder/SkillBuilderFormContext";
-import type { SkillType } from "@app/types/assistant/skill_configuration";
+import type {
+  SkillRelations,
+  SkillType,
+} from "@app/types/assistant/skill_configuration";
 import type { UserType } from "@app/types/user";
 
 /**
@@ -8,7 +11,7 @@ import type { UserType } from "@app/types/user";
  * Editors are intentionally set to empty defaults as they will be populated reactively.
  */
 export function transformSkillTypeToFormData(
-  skill: SkillType
+  skill: SkillType & { relations?: Pick<SkillRelations, "childSkills"> }
 ): SkillBuilderFormData {
   return {
     name: skill.name,
@@ -24,6 +27,13 @@ export function transformSkillTypeToFormData(
     isDefault: skill.isDefault,
     reinforcement: skill.reinforcement,
     additionalSpaces: [],
+    referencedSkills:
+      skill.relations?.childSkills?.map((childSkill) => ({
+        id: childSkill.sId,
+        name: childSkill.name,
+        icon: childSkill.icon,
+        requestedSpaceIds: childSkill.requestedSpaceIds,
+      })) ?? [],
   };
 }
 
@@ -51,5 +61,6 @@ export function getDefaultSkillFormData({
     isDefault: false,
     reinforcement: "on",
     additionalSpaces: [],
+    referencedSkills: [],
   };
 }
